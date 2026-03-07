@@ -17,7 +17,8 @@ function createMockStore(): PendingMessageStore {
       tool_response: msg.tool_response ? JSON.parse(msg.tool_response) : undefined,
       prompt_number: msg.prompt_number || undefined,
       cwd: msg.cwd || undefined,
-      last_assistant_message: msg.last_assistant_message || undefined
+      last_assistant_message: msg.last_assistant_message || undefined,
+      project_override: msg.project_override || undefined
     }))
   } as unknown as PendingMessageStore;
 }
@@ -37,6 +38,7 @@ function createMockMessage(overrides: Partial<PersistentPendingMessage> = {}): P
     cwd: '/test',
     last_assistant_message: null,
     prompt_number: 1,
+    project_override: null,
     status: 'pending',
     retry_count: 0,
     created_at_epoch: Date.now(),

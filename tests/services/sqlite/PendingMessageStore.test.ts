@@ -5,6 +5,95 @@ import { createSDKSession } from '../../../src/services/sqlite/Sessions.js';
 import type { PendingMessage } from '../../../src/services/worker-types.js';
 import type { Database } from 'bun:sqlite';
 
+describe('PendingMessageStore - Roundtrip Integrity', () => {
+  let db: Database;
+  let store: PendingMessageStore;
+  let sessionDbId: number;
+  const CONTENT_SESSION_ID = 'test-roundtrip';
+
+  beforeEach(() => {
+    db = new ClaudeMemDatabase(':memory:').db;
+    store = new PendingMessageStore(db, 3);
+    sessionDbId = createSDKSession(db, CONTENT_SESSION_ID, 'test-project', 'Test prompt');
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test('enqueue → claimNextMessage → toPendingMessage preserves ALL fields', () => {
+    // Create a PendingMessage with EVERY field populated
+    const original: PendingMessage = {
+      type: 'observation',
+      tool_name: 'Read',
+      tool_input: { file_path: '/home/user/project/src/index.ts' },
+      tool_response: { content: 'file contents here', lines: 42 },
+      prompt_number: 7,
+      cwd: '/home/user/project',
+      last_assistant_message: 'Let me read that file for you.',
+      project_override: 'my-custom-project',
+    };
+
+    // Roundtrip: enqueue → claim → convert back
+    store.enqueue(sessionDbId, CONTENT_SESSION_ID, original);
+    const claimed = store.claimNextMessage(sessionDbId);
+    expect(claimed).not.toBeNull();
+
+    const restored = store.toPendingMessage(claimed!);
+
+    // Assert every field matches
+    expect(restored.type).toBe(original.type);
+    expect(restored.tool_name).toBe(original.tool_name);
+    expect(restored.tool_input).toEqual(original.tool_input);
+    expect(restored.tool_response).toEqual(original.tool_response);
+    expect(restored.prompt_number).toBe(original.prompt_number);
+    expect(restored.cwd).toBe(original.cwd);
+    expect(restored.last_assistant_message).toBe(original.last_assistant_message);
+    expect(restored.project_override).toBe(original.project_override);
+  });
+
+  test('roundtrip preserves fields for summarize type', () => {
+    const original: PendingMessage = {
+      type: 'summarize',
+      last_assistant_message: 'Here is the summary of our session.',
+      project_override: 'legal-core',
+    };
+
+    store.enqueue(sessionDbId, CONTENT_SESSION_ID, original);
+    const claimed = store.claimNextMessage(sessionDbId);
+    expect(claimed).not.toBeNull();
+
+    const restored = store.toPendingMessage(claimed!);
+
+    expect(restored.type).toBe(original.type);
+    expect(restored.last_assistant_message).toBe(original.last_assistant_message);
+    expect(restored.project_override).toBe(original.project_override);
+    // Optional fields should be undefined, not null
+    expect(restored.tool_name).toBeUndefined();
+    expect(restored.tool_input).toBeUndefined();
+    expect(restored.tool_response).toBeUndefined();
+    expect(restored.prompt_number).toBeUndefined();
+    expect(restored.cwd).toBeUndefined();
+  });
+
+  test('project_override is persisted in database column', () => {
+    const message: PendingMessage = {
+      type: 'observation',
+      tool_name: 'Grep',
+      tool_input: { pattern: 'test' },
+      tool_response: { matches: [] },
+      prompt_number: 1,
+      project_override: 'prognosticos',
+    };
+
+    const msgId = store.enqueue(sessionDbId, CONTENT_SESSION_ID, message);
+
+    // Verify directly in the database
+    const row = db.query('SELECT project_override FROM pending_messages WHERE id = ?').get(msgId) as { project_override: string | null };
+    expect(row.project_override).toBe('prognosticos');
+  });
+});
+
 describe('PendingMessageStore - Self-Healing claimNextMessage', () => {
   let db: Database;
   let store: PendingMessageStore;
