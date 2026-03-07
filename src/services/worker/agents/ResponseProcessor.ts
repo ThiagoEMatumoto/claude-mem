@@ -11,19 +11,33 @@
  * This module extracts 150+ lines of duplicate code from SDKAgent, GeminiAgent, and OpenRouterAgent.
  */
 
-import { logger } from '../../../utils/logger.js';
-import { parseObservations, parseSummary, type ParsedObservation, type ParsedSummary } from '../../../sdk/parser.js';
-import { updateCursorContextForProject } from '../../integrations/CursorHooksInstaller.js';
-import { updateFolderClaudeMdFiles } from '../../../utils/claude-md-utils.js';
-import { getWorkerPort } from '../../../shared/worker-utils.js';
-import { SettingsDefaultsManager } from '../../../shared/SettingsDefaultsManager.js';
-import { USER_SETTINGS_PATH } from '../../../shared/paths.js';
-import type { ActiveSession } from '../../worker-types.js';
-import type { DatabaseManager } from '../DatabaseManager.js';
-import type { SessionManager } from '../SessionManager.js';
-import type { WorkerRef, StorageResult } from './types.js';
-import { broadcastObservation, broadcastSummary } from './ObservationBroadcaster.js';
-import { cleanupProcessedMessages } from './SessionCleanupHelper.js';
+import { logger } from "../../../utils/logger.js";
+import {
+	parseObservations,
+	parseSummary,
+	type ParsedObservation,
+	type ParsedSummary,
+} from "../../../sdk/parser.js";
+import { updateCursorContextForProject } from "../../integrations/CursorHooksInstaller.js";
+import { updateFolderClaudeMdFiles } from "../../../utils/claude-md-utils.js";
+import { getWorkerPort } from "../../../shared/worker-utils.js";
+import { SettingsDefaultsManager } from "../../../shared/SettingsDefaultsManager.js";
+import { USER_SETTINGS_PATH } from "../../../shared/paths.js";
+import type { ActiveSession } from "../../worker-types.js";
+import type { DatabaseManager } from "../DatabaseManager.js";
+import type { SessionManager } from "../SessionManager.js";
+import type { WorkerRef, StorageResult } from "./types.js";
+import {
+	broadcastObservation,
+	broadcastSummary,
+} from "./ObservationBroadcaster.js";
+import { cleanupProcessedMessages } from "./SessionCleanupHelper.js";
+import {
+	findHubConfigRoot,
+	loadHubConfig,
+	resolveProjectFromFilePath,
+} from "../../../utils/project-name.js";
+import { resolveProjectFromContent } from "../../../utils/content-project-resolver.js";
 
 /**
  * Process agent response text (parse XML, save to database, sync to Chroma, broadcast SSE)
@@ -46,295 +60,417 @@ import { cleanupProcessedMessages } from './SessionCleanupHelper.js';
  * @param agentName - Name of the agent for logging (e.g., 'SDK', 'Gemini', 'OpenRouter')
  */
 export async function processAgentResponse(
-  text: string,
-  session: ActiveSession,
-  dbManager: DatabaseManager,
-  sessionManager: SessionManager,
-  worker: WorkerRef | undefined,
-  discoveryTokens: number,
-  originalTimestamp: number | null,
-  agentName: string,
-  projectRoot?: string
+	text: string,
+	session: ActiveSession,
+	dbManager: DatabaseManager,
+	sessionManager: SessionManager,
+	worker: WorkerRef | undefined,
+	discoveryTokens: number,
+	originalTimestamp: number | null,
+	agentName: string,
+	projectRoot?: string,
 ): Promise<void> {
-  // Track generator activity for stale detection (Issue #1099)
-  session.lastGeneratorActivity = Date.now();
+	// Track generator activity for stale detection (Issue #1099)
+	session.lastGeneratorActivity = Date.now();
 
-  // Add assistant response to shared conversation history for provider interop
-  if (text) {
-    session.conversationHistory.push({ role: 'assistant', content: text });
-  }
+	// Add assistant response to shared conversation history for provider interop
+	if (text) {
+		session.conversationHistory.push({ role: "assistant", content: text });
+	}
 
-  // Parse observations and summary
-  const observations = parseObservations(text, session.contentSessionId);
-  const summary = parseSummary(text, session.sessionDbId);
+	// Parse observations and summary
+	const observations = parseObservations(text, session.contentSessionId);
+	const summary = parseSummary(text, session.sessionDbId);
 
-  // Convert nullable fields to empty strings for storeSummary (if summary exists)
-  const summaryForStore = normalizeSummaryForStorage(summary);
+	// Convert nullable fields to empty strings for storeSummary (if summary exists)
+	const summaryForStore = normalizeSummaryForStorage(summary);
 
-  // Get session store for atomic transaction
-  const sessionStore = dbManager.getSessionStore();
+	// Get session store for atomic transaction
+	const sessionStore = dbManager.getSessionStore();
 
-  // CRITICAL: Must use memorySessionId (not contentSessionId) for FK constraint
-  if (!session.memorySessionId) {
-    throw new Error('Cannot store observations: memorySessionId not yet captured');
-  }
+	// CRITICAL: Must use memorySessionId (not contentSessionId) for FK constraint
+	if (!session.memorySessionId) {
+		throw new Error(
+			"Cannot store observations: memorySessionId not yet captured",
+		);
+	}
 
-  // SAFETY NET (Issue #846 / Multi-terminal FK fix):
-  // The PRIMARY fix is in SDKAgent.ts where ensureMemorySessionIdRegistered() is called
-  // immediately when the SDK returns a memory_session_id. This call is a defensive safety net
-  // in case the DB was somehow not updated (race condition, crash, etc.).
-  // In multi-terminal scenarios, createSDKSession() now resets memory_session_id to NULL
-  // for each new generator, ensuring clean isolation.
-  sessionStore.ensureMemorySessionIdRegistered(session.sessionDbId, session.memorySessionId);
+	// SAFETY NET (Issue #846 / Multi-terminal FK fix):
+	// The PRIMARY fix is in SDKAgent.ts where ensureMemorySessionIdRegistered() is called
+	// immediately when the SDK returns a memory_session_id. This call is a defensive safety net
+	// in case the DB was somehow not updated (race condition, crash, etc.).
+	// In multi-terminal scenarios, createSDKSession() now resets memory_session_id to NULL
+	// for each new generator, ensuring clean isolation.
+	sessionStore.ensureMemorySessionIdRegistered(
+		session.sessionDbId,
+		session.memorySessionId,
+	);
 
-  // Log pre-storage with session ID chain for verification
-  logger.info('DB', `STORING | sessionDbId=${session.sessionDbId} | memorySessionId=${session.memorySessionId} | obsCount=${observations.length} | hasSummary=${!!summaryForStore}`, {
-    sessionId: session.sessionDbId,
-    memorySessionId: session.memorySessionId
-  });
+	// Log pre-storage with session ID chain for verification
+	logger.info(
+		"DB",
+		`STORING | sessionDbId=${session.sessionDbId} | memorySessionId=${session.memorySessionId} | obsCount=${observations.length} | hasSummary=${!!summaryForStore}`,
+		{
+			sessionId: session.sessionDbId,
+			memorySessionId: session.memorySessionId,
+		},
+	);
 
-  // Hub mode: use per-observation project override if available
-  const effectiveProject = session.currentProjectOverride || session.project;
+	// Hub mode: use per-observation project override if available
+	let effectiveProject = session.currentProjectOverride || session.project;
 
-  // ATOMIC TRANSACTION: Store observations + summary ONCE
-  // Messages are already deleted from queue on claim, so no completion tracking needed
-  const result = sessionStore.storeObservations(
-    session.memorySessionId,
-    effectiveProject,
-    observations,
-    summaryForStore,
-    session.lastPromptNumber,
-    discoveryTokens,
-    originalTimestamp ?? undefined
-  );
+	// Safety net: re-resolve project from LLM-generated file paths if still default.
+	// The hook resolves project from tool INPUT, but the LLM generates more complete
+	// files_read/files_modified after analysis. If the hook failed (e.g. Agent tool
+	// with no extractable paths), the worker can catch it here.
+	//
+	// FIX: projectRoot may be lastCwd (tool's working directory, e.g. /home/user/project/src),
+	// not the vault root where .claude-mem-hub.json lives. Walk up to find the actual hub root.
+	const resolvedHubRoot = findHubConfigRoot(projectRoot);
+	if (resolvedHubRoot) {
+		const hubConfig = loadHubConfig(resolvedHubRoot);
+		logger.info(
+			"WORKER",
+			`Safety net check | projectRoot=${resolvedHubRoot} (from lastCwd=${projectRoot}) | effectiveProject=${effectiveProject} | currentProjectOverride=${session.currentProjectOverride || "none"} | hubDefault=${hubConfig?.default_project || "none"} | obsCount=${observations.length} | obsFilePaths=${observations.flatMap(o => [...(o.files_read || []), ...(o.files_modified || [])]).length}`,
+		);
+		if (
+			hubConfig &&
+			effectiveProject === hubConfig.default_project &&
+			observations.length > 0
+		) {
+			for (const obs of observations) {
+				const allPaths = [
+					...(obs.files_read || []),
+					...(obs.files_modified || []),
+				];
+				for (const fp of allPaths) {
+					const resolved = resolveProjectFromFilePath(
+						fp,
+						resolvedHubRoot,
+						hubConfig,
+					);
+					if (resolved !== hubConfig.default_project) {
+						effectiveProject = resolved;
+						logger.info(
+							"WORKER",
+							`Worker re-resolved project from file paths: ${resolved}`,
+							{
+								filePath: fp,
+								previousProject: hubConfig.default_project,
+							},
+						);
+						break;
+					}
+				}
+				if (effectiveProject !== hubConfig.default_project) break;
+			}
+		}
+	}
 
-  // Log storage result with IDs for end-to-end traceability
-  logger.info('DB', `STORED | sessionDbId=${session.sessionDbId} | memorySessionId=${session.memorySessionId} | obsCount=${result.observationIds.length} | obsIds=[${result.observationIds.join(',')}] | summaryId=${result.summaryId || 'none'}`, {
-    sessionId: session.sessionDbId,
-    memorySessionId: session.memorySessionId
-  });
+	// Content-based fallback: if still default after file-path resolution,
+	// try to infer project from observation titles and content.
+	// This catches observations about specific projects that have no file paths
+	// (e.g. "TRF2 Crawler Batch Jobs Running" → prognosticos).
+	if (resolvedHubRoot) {
+		const hubConfig2 = loadHubConfig(resolvedHubRoot);
+		if (hubConfig2 && effectiveProject === hubConfig2.default_project && observations.length > 0) {
+			const allContent = observations
+				.map((o) => `${o.title || ""} ${o.subtitle || ""} ${o.facts || ""}`)
+				.join(" ");
+			const contentProject = resolveProjectFromContent(allContent, hubConfig2);
+			if (contentProject) {
+				effectiveProject = contentProject;
+				logger.info(
+					"WORKER",
+					`Content-based project resolution: ${contentProject}`,
+					{ previousProject: hubConfig2.default_project },
+				);
+			}
+		}
+	}
 
-  // CLAIM-CONFIRM: Now that storage succeeded, confirm all processing messages (delete from queue)
-  // This is the critical step that prevents message loss on generator crash
-  const pendingStore = sessionManager.getPendingMessageStore();
-  for (const messageId of session.processingMessageIds) {
-    pendingStore.confirmProcessed(messageId);
-  }
-  if (session.processingMessageIds.length > 0) {
-    logger.debug('QUEUE', `CONFIRMED_BATCH | sessionDbId=${session.sessionDbId} | count=${session.processingMessageIds.length} | ids=[${session.processingMessageIds.join(',')}]`);
-  }
-  // Clear the tracking array after confirmation
-  session.processingMessageIds = [];
+	// ATOMIC TRANSACTION: Store observations + summary ONCE
+	// Messages are already deleted from queue on claim, so no completion tracking needed
+	const result = sessionStore.storeObservations(
+		session.memorySessionId,
+		effectiveProject,
+		observations,
+		summaryForStore,
+		session.lastPromptNumber,
+		discoveryTokens,
+		originalTimestamp ?? undefined,
+	);
 
-  // AFTER transaction commits - async operations (can fail safely without data loss)
-  await syncAndBroadcastObservations(
-    observations,
-    result,
-    session,
-    dbManager,
-    worker,
-    discoveryTokens,
-    agentName,
-    projectRoot,
-    effectiveProject
-  );
+	// Log storage result with IDs for end-to-end traceability
+	logger.info(
+		"DB",
+		`STORED | sessionDbId=${session.sessionDbId} | memorySessionId=${session.memorySessionId} | obsCount=${result.observationIds.length} | obsIds=[${result.observationIds.join(",")}] | summaryId=${result.summaryId || "none"}`,
+		{
+			sessionId: session.sessionDbId,
+			memorySessionId: session.memorySessionId,
+		},
+	);
 
-  // Sync and broadcast summary if present
-  await syncAndBroadcastSummary(
-    summary,
-    summaryForStore,
-    result,
-    session,
-    dbManager,
-    worker,
-    discoveryTokens,
-    agentName,
-    effectiveProject
-  );
+	// CLAIM-CONFIRM: Now that storage succeeded, confirm all processing messages (delete from queue)
+	// This is the critical step that prevents message loss on generator crash
+	const pendingStore = sessionManager.getPendingMessageStore();
+	for (const messageId of session.processingMessageIds) {
+		pendingStore.confirmProcessed(messageId);
+	}
+	if (session.processingMessageIds.length > 0) {
+		logger.debug(
+			"QUEUE",
+			`CONFIRMED_BATCH | sessionDbId=${session.sessionDbId} | count=${session.processingMessageIds.length} | ids=[${session.processingMessageIds.join(",")}]`,
+		);
+	}
+	// Clear the tracking array after confirmation
+	session.processingMessageIds = [];
 
-  // Clean up session state
-  cleanupProcessedMessages(session, worker);
+	// AFTER transaction commits - async operations (can fail safely without data loss)
+	await syncAndBroadcastObservations(
+		observations,
+		result,
+		session,
+		dbManager,
+		worker,
+		discoveryTokens,
+		agentName,
+		projectRoot,
+		effectiveProject,
+	);
+
+	// Sync and broadcast summary if present
+	await syncAndBroadcastSummary(
+		summary,
+		summaryForStore,
+		result,
+		session,
+		dbManager,
+		worker,
+		discoveryTokens,
+		agentName,
+		effectiveProject,
+	);
+
+	// Clean up session state
+	cleanupProcessedMessages(session, worker);
 }
 
 /**
  * Normalize summary for storage (convert null fields to empty strings)
  */
 function normalizeSummaryForStorage(summary: ParsedSummary | null): {
-  request: string;
-  investigated: string;
-  learned: string;
-  completed: string;
-  next_steps: string;
-  notes: string | null;
+	request: string;
+	investigated: string;
+	learned: string;
+	completed: string;
+	next_steps: string;
+	notes: string | null;
 } | null {
-  if (!summary) return null;
+	if (!summary) return null;
 
-  return {
-    request: summary.request || '',
-    investigated: summary.investigated || '',
-    learned: summary.learned || '',
-    completed: summary.completed || '',
-    next_steps: summary.next_steps || '',
-    notes: summary.notes
-  };
+	return {
+		request: summary.request || "",
+		investigated: summary.investigated || "",
+		learned: summary.learned || "",
+		completed: summary.completed || "",
+		next_steps: summary.next_steps || "",
+		notes: summary.notes,
+	};
 }
 
 /**
  * Sync observations to Chroma and broadcast to SSE clients
  */
 async function syncAndBroadcastObservations(
-  observations: ParsedObservation[],
-  result: StorageResult,
-  session: ActiveSession,
-  dbManager: DatabaseManager,
-  worker: WorkerRef | undefined,
-  discoveryTokens: number,
-  agentName: string,
-  projectRoot?: string,
-  effectiveProject?: string
+	observations: ParsedObservation[],
+	result: StorageResult,
+	session: ActiveSession,
+	dbManager: DatabaseManager,
+	worker: WorkerRef | undefined,
+	discoveryTokens: number,
+	agentName: string,
+	projectRoot?: string,
+	effectiveProject?: string,
 ): Promise<void> {
-  const project = effectiveProject || session.project;
+	const project = effectiveProject || session.project;
 
-  for (let i = 0; i < observations.length; i++) {
-    const obsId = result.observationIds[i];
-    const obs = observations[i];
-    const chromaStart = Date.now();
+	for (let i = 0; i < observations.length; i++) {
+		const obsId = result.observationIds[i];
+		const obs = observations[i];
+		const chromaStart = Date.now();
 
-    // Sync to Chroma (fire-and-forget, skipped if Chroma is disabled)
-    dbManager.getChromaSync()?.syncObservation(
-      obsId,
-      session.contentSessionId,
-      project,
-      obs,
-      session.lastPromptNumber,
-      result.createdAtEpoch,
-      discoveryTokens
-    ).then(() => {
-      const chromaDuration = Date.now() - chromaStart;
-      logger.debug('CHROMA', 'Observation synced', {
-        obsId,
-        duration: `${chromaDuration}ms`,
-        type: obs.type,
-        title: obs.title || '(untitled)'
-      });
-    }).catch((error) => {
-      logger.error('CHROMA', `${agentName} chroma sync failed, continuing without vector search`, {
-        obsId,
-        type: obs.type,
-        title: obs.title || '(untitled)'
-      }, error);
-    });
+		// Sync to Chroma (fire-and-forget, skipped if Chroma is disabled)
+		dbManager
+			.getChromaSync()
+			?.syncObservation(
+				obsId,
+				session.contentSessionId,
+				project,
+				obs,
+				session.lastPromptNumber,
+				result.createdAtEpoch,
+				discoveryTokens,
+			)
+			.then(() => {
+				const chromaDuration = Date.now() - chromaStart;
+				logger.debug("CHROMA", "Observation synced", {
+					obsId,
+					duration: `${chromaDuration}ms`,
+					type: obs.type,
+					title: obs.title || "(untitled)",
+				});
+			})
+			.catch((error) => {
+				logger.error(
+					"CHROMA",
+					`${agentName} chroma sync failed, continuing without vector search`,
+					{
+						obsId,
+						type: obs.type,
+						title: obs.title || "(untitled)",
+					},
+					error,
+				);
+			});
 
-    // Broadcast to SSE clients (for web UI)
-    // BUGFIX: Use obs.files_read and obs.files_modified (not obs.files)
-    broadcastObservation(worker, {
-      id: obsId,
-      memory_session_id: session.memorySessionId,
-      session_id: session.contentSessionId,
-      type: obs.type,
-      title: obs.title,
-      subtitle: obs.subtitle,
-      text: null,  // text field is not in ParsedObservation
-      narrative: obs.narrative || null,
-      facts: JSON.stringify(obs.facts || []),
-      concepts: JSON.stringify(obs.concepts || []),
-      files_read: JSON.stringify(obs.files_read || []),
-      files_modified: JSON.stringify(obs.files_modified || []),
-      project,
-      prompt_number: session.lastPromptNumber,
-      created_at_epoch: result.createdAtEpoch
-    });
-  }
+		// Broadcast to SSE clients (for web UI)
+		// BUGFIX: Use obs.files_read and obs.files_modified (not obs.files)
+		broadcastObservation(worker, {
+			id: obsId,
+			memory_session_id: session.memorySessionId,
+			session_id: session.contentSessionId,
+			type: obs.type,
+			title: obs.title,
+			subtitle: obs.subtitle,
+			text: null, // text field is not in ParsedObservation
+			narrative: obs.narrative || null,
+			facts: JSON.stringify(obs.facts || []),
+			concepts: JSON.stringify(obs.concepts || []),
+			files_read: JSON.stringify(obs.files_read || []),
+			files_modified: JSON.stringify(obs.files_modified || []),
+			project,
+			prompt_number: session.lastPromptNumber,
+			created_at_epoch: result.createdAtEpoch,
+		});
+	}
 
-  // Update folder CLAUDE.md files for touched folders (fire-and-forget)
-  // This runs per-observation batch to ensure folders are updated as work happens
-  // Only runs if CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED is true (default: false)
-  const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
-  // Handle both string 'true' and boolean true from JSON settings
-  const settingValue = settings.CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED;
-  const folderClaudeMdEnabled = settingValue === 'true' || settingValue === true;
+	// Update folder CLAUDE.md files for touched folders (fire-and-forget)
+	// This runs per-observation batch to ensure folders are updated as work happens
+	// Only runs if CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED is true (default: false)
+	const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+	// Handle both string 'true' and boolean true from JSON settings
+	const settingValue = settings.CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED;
+	const folderClaudeMdEnabled =
+		settingValue === "true" || settingValue === true;
 
-  if (folderClaudeMdEnabled) {
-    const allFilePaths: string[] = [];
-    for (const obs of observations) {
-      allFilePaths.push(...(obs.files_modified || []));
-      allFilePaths.push(...(obs.files_read || []));
-    }
+	if (folderClaudeMdEnabled) {
+		const allFilePaths: string[] = [];
+		for (const obs of observations) {
+			allFilePaths.push(...(obs.files_modified || []));
+			allFilePaths.push(...(obs.files_read || []));
+		}
 
-    if (allFilePaths.length > 0) {
-      updateFolderClaudeMdFiles(
-        allFilePaths,
-        project,
-        getWorkerPort(),
-        projectRoot
-      ).catch(error => {
-        logger.warn('FOLDER_INDEX', 'CLAUDE.md update failed (non-critical)', { project }, error as Error);
-      });
-    }
-  }
+		if (allFilePaths.length > 0) {
+			updateFolderClaudeMdFiles(
+				allFilePaths,
+				project,
+				getWorkerPort(),
+				projectRoot,
+			).catch((error) => {
+				logger.warn(
+					"FOLDER_INDEX",
+					"CLAUDE.md update failed (non-critical)",
+					{ project },
+					error as Error,
+				);
+			});
+		}
+	}
 }
 
 /**
  * Sync summary to Chroma and broadcast to SSE clients
  */
 async function syncAndBroadcastSummary(
-  summary: ParsedSummary | null,
-  summaryForStore: { request: string; investigated: string; learned: string; completed: string; next_steps: string; notes: string | null } | null,
-  result: StorageResult,
-  session: ActiveSession,
-  dbManager: DatabaseManager,
-  worker: WorkerRef | undefined,
-  discoveryTokens: number,
-  agentName: string,
-  effectiveProject?: string
+	summary: ParsedSummary | null,
+	summaryForStore: {
+		request: string;
+		investigated: string;
+		learned: string;
+		completed: string;
+		next_steps: string;
+		notes: string | null;
+	} | null,
+	result: StorageResult,
+	session: ActiveSession,
+	dbManager: DatabaseManager,
+	worker: WorkerRef | undefined,
+	discoveryTokens: number,
+	agentName: string,
+	effectiveProject?: string,
 ): Promise<void> {
-  if (!summaryForStore || !result.summaryId) {
-    return;
-  }
+	if (!summaryForStore || !result.summaryId) {
+		return;
+	}
 
-  const project = effectiveProject || session.project;
-  const chromaStart = Date.now();
+	const project = effectiveProject || session.project;
+	const chromaStart = Date.now();
 
-  // Sync to Chroma (fire-and-forget, skipped if Chroma is disabled)
-  dbManager.getChromaSync()?.syncSummary(
-    result.summaryId,
-    session.contentSessionId,
-    project,
-    summaryForStore,
-    session.lastPromptNumber,
-    result.createdAtEpoch,
-    discoveryTokens
-  ).then(() => {
-    const chromaDuration = Date.now() - chromaStart;
-    logger.debug('CHROMA', 'Summary synced', {
-      summaryId: result.summaryId,
-      duration: `${chromaDuration}ms`,
-      request: summaryForStore.request || '(no request)'
-    });
-  }).catch((error) => {
-    logger.error('CHROMA', `${agentName} chroma sync failed, continuing without vector search`, {
-      summaryId: result.summaryId,
-      request: summaryForStore.request || '(no request)'
-    }, error);
-  });
+	// Sync to Chroma (fire-and-forget, skipped if Chroma is disabled)
+	dbManager
+		.getChromaSync()
+		?.syncSummary(
+			result.summaryId,
+			session.contentSessionId,
+			project,
+			summaryForStore,
+			session.lastPromptNumber,
+			result.createdAtEpoch,
+			discoveryTokens,
+		)
+		.then(() => {
+			const chromaDuration = Date.now() - chromaStart;
+			logger.debug("CHROMA", "Summary synced", {
+				summaryId: result.summaryId,
+				duration: `${chromaDuration}ms`,
+				request: summaryForStore.request || "(no request)",
+			});
+		})
+		.catch((error) => {
+			logger.error(
+				"CHROMA",
+				`${agentName} chroma sync failed, continuing without vector search`,
+				{
+					summaryId: result.summaryId,
+					request: summaryForStore.request || "(no request)",
+				},
+				error,
+			);
+		});
 
-  // Broadcast to SSE clients (for web UI)
-  broadcastSummary(worker, {
-    id: result.summaryId,
-    session_id: session.contentSessionId,
-    request: summary!.request,
-    investigated: summary!.investigated,
-    learned: summary!.learned,
-    completed: summary!.completed,
-    next_steps: summary!.next_steps,
-    notes: summary!.notes,
-    project,
-    prompt_number: session.lastPromptNumber,
-    created_at_epoch: result.createdAtEpoch
-  });
+	// Broadcast to SSE clients (for web UI)
+	broadcastSummary(worker, {
+		id: result.summaryId,
+		session_id: session.contentSessionId,
+		request: summary!.request,
+		investigated: summary!.investigated,
+		learned: summary!.learned,
+		completed: summary!.completed,
+		next_steps: summary!.next_steps,
+		notes: summary!.notes,
+		project,
+		prompt_number: session.lastPromptNumber,
+		created_at_epoch: result.createdAtEpoch,
+	});
 
-  // Update Cursor context file for registered projects (fire-and-forget)
-  updateCursorContextForProject(project, getWorkerPort()).catch(error => {
-    logger.warn('CURSOR', 'Context update failed (non-critical)', { project }, error as Error);
-  });
+	// Update Cursor context file for registered projects (fire-and-forget)
+	updateCursorContextForProject(project, getWorkerPort()).catch((error) => {
+		logger.warn(
+			"CURSOR",
+			"Context update failed (non-critical)",
+			{ project },
+			error as Error,
+		);
+	});
 }
