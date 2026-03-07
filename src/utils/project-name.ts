@@ -29,6 +29,13 @@ export interface HubConfig {
    * matching to avoid false positives on vault-internal directories.
    */
   vault_content_prefixes?: string[];
+  /**
+   * Content keyword patterns for fallback project resolution.
+   * Key: keyword to search for in observation titles/content
+   * Value: project name to assign
+   * Used when file-path resolution fails (no files or all vault content).
+   */
+  content_keywords?: Record<string, string>;
 }
 
 // Cache hub config per cwd to avoid repeated filesystem reads
@@ -77,6 +84,34 @@ export function loadHubConfig(cwd: string | null | undefined): HubConfig | null 
     hubConfigCache.set(cwd, { config: null, mtime: 0 });
     return null;
   }
+}
+
+/**
+ * Find the nearest ancestor directory containing .claude-mem-hub.json.
+ * Walks up from the given path until it finds the hub config or reaches root.
+ * Returns null if no hub config is found.
+ *
+ * This solves the "lastCwd vs vault root" problem: agents have the tool's
+ * working directory (e.g. /home/user/project/src) but need the vault root
+ * (e.g. /home/user/Obsidian) where .claude-mem-hub.json lives.
+ */
+export function findHubConfigRoot(startPath: string | undefined): string | null {
+  if (!startPath) return null;
+
+  let current = path.resolve(startPath);
+  const root = path.parse(current).root;
+
+  while (current !== root) {
+    const configPath = path.join(current, '.claude-mem-hub.json');
+    try {
+      fs.accessSync(configPath, fs.constants.R_OK);
+      return current;
+    } catch {
+      // Not found here, walk up
+    }
+    current = path.dirname(current);
+  }
+  return null;
 }
 
 /**

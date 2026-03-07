@@ -74,9 +74,12 @@ export const observationHandler: EventHandler = {
             break;
           }
         }
-        // If all paths resolved to default, use default
+        // If all paths resolved to default, check session cache before falling back.
+        // This prevents the pattern where vault content files (Threads/lexter/Prognosticos/...)
+        // resolve to default even though the session is working on a specific project.
         if (!projectOverride) {
-          projectOverride = hubConfig.default_project;
+          const stickyProject = sessionProjectCache.get(sessionId ?? '');
+          projectOverride = stickyProject ?? hubConfig.default_project;
         }
         logger.debug('HOOK', 'Hub mode: resolved project from file paths', {
           toolName,
@@ -99,7 +102,11 @@ export const observationHandler: EventHandler = {
         }
       }
 
-      // Update session-sticky project when we resolve to a non-default project
+      // Update session-sticky project when we resolve to a non-default project.
+      // "Most specific wins": if an observation resolves to a real project,
+      // all subsequent observations in this session inherit that project.
+      // We never cache the default project to avoid locking sessions to default
+      // when the first observation happens to have no project-specific files.
       if (sessionId && projectOverride !== hubConfig.default_project) {
         sessionProjectCache.set(sessionId, projectOverride);
       }
