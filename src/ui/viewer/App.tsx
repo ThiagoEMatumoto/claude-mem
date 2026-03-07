@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Header } from './components/Header';
+import { Header, ViewMode } from './components/Header';
 import { Feed } from './components/Feed';
+import { ProjectExplorer } from './components/ProjectExplorer';
+import { SearchBar } from './components/SearchBar';
+import { AddObservationModal } from './components/AddObservationModal';
 import { ContextSettingsModal } from './components/ContextSettingsModal';
 import { LogsDrawer } from './components/LogsModal';
 import { useSSE } from './hooks/useSSE';
@@ -13,6 +16,9 @@ import { mergeAndDeduplicateByProject } from './utils/data';
 
 export function App() {
   const [currentFilter, setCurrentFilter] = useState('');
+  const [viewMode, setViewMode] = useState<ViewMode>('feed');
+  const [addModalOpen, setAddModalOpen] = useState(false);
+  const [searchResults, setSearchResults] = useState<Observation[] | null>(null);
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
   const [logsModalOpen, setLogsModalOpen] = useState(false);
   const [paginatedObservations, setPaginatedObservations] = useState<Observation[]>([]);
@@ -49,6 +55,31 @@ export function App() {
     }
     return mergeAndDeduplicateByProject(prompts, paginatedPrompts);
   }, [prompts, paginatedPrompts, currentFilter]);
+
+  // Handle search results (null = clear search, show normal feed)
+  const handleSearchResults = useCallback((results: Observation[] | null) => {
+    setSearchResults(results);
+  }, []);
+
+  // Handle observation delete/update from cards
+  const handleObservationDeleted = useCallback((id: number) => {
+    setPaginatedObservations(prev => prev.filter(o => o.id !== id));
+  }, []);
+
+  const handleObservationUpdated = useCallback((updated: Observation) => {
+    setPaginatedObservations(prev => prev.map(o => o.id === updated.id ? updated : o));
+  }, []);
+
+  // Handle project selection from ProjectExplorer
+  const handleSelectProject = useCallback((project: string) => {
+    setCurrentFilter(project);
+    setViewMode('feed');
+  }, []);
+
+  // Toggle add observation modal
+  const toggleAddModal = useCallback(() => {
+    setAddModalOpen(prev => !prev);
+  }, []);
 
   // Toggle context preview modal
   const toggleContextPreview = useCallback(() => {
@@ -104,16 +135,29 @@ export function App() {
         themePreference={preference}
         onThemeChange={setThemePreference}
         onContextPreviewToggle={toggleContextPreview}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        onAddObservation={toggleAddModal}
       />
 
-      <Feed
-        observations={allObservations}
-        summaries={allSummaries}
-        prompts={allPrompts}
-        onLoadMore={handleLoadMore}
-        isLoading={pagination.observations.isLoading || pagination.summaries.isLoading || pagination.prompts.isLoading}
-        hasMore={pagination.observations.hasMore || pagination.summaries.hasMore || pagination.prompts.hasMore}
-      />
+      {viewMode === 'feed' && (
+        <SearchBar currentFilter={currentFilter} onSearchResults={handleSearchResults} />
+      )}
+
+      {viewMode === 'feed' ? (
+        <Feed
+          observations={searchResults !== null ? searchResults : allObservations}
+          summaries={searchResults !== null ? [] : allSummaries}
+          prompts={searchResults !== null ? [] : allPrompts}
+          onLoadMore={handleLoadMore}
+          isLoading={searchResults === null && (pagination.observations.isLoading || pagination.summaries.isLoading || pagination.prompts.isLoading)}
+          hasMore={searchResults === null && (pagination.observations.hasMore || pagination.summaries.hasMore || pagination.prompts.hasMore)}
+          onObservationDeleted={handleObservationDeleted}
+          onObservationUpdated={handleObservationUpdated}
+        />
+      ) : (
+        <ProjectExplorer onSelectProject={handleSelectProject} />
+      )}
 
       <ContextSettingsModal
         isOpen={contextPreviewOpen}
@@ -138,6 +182,12 @@ export function App() {
       <LogsDrawer
         isOpen={logsModalOpen}
         onClose={toggleLogsModal}
+      />
+
+      <AddObservationModal
+        isOpen={addModalOpen}
+        onClose={toggleAddModal}
+        projects={projects}
       />
     </>
   );

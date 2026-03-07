@@ -43,7 +43,7 @@ export type FeedItem =
   | (UserPrompt & { itemType: 'prompt' });
 
 export interface StreamEvent {
-  type: 'initial_load' | 'new_observation' | 'new_summary' | 'new_prompt' | 'processing_status';
+  type: 'initial_load' | 'new_observation' | 'new_summary' | 'new_prompt' | 'processing_status' | 'observation_deleted' | 'observation_updated';
   observations?: Observation[];
   summaries?: Summary[];
   prompts?: UserPrompt[];
@@ -52,6 +52,23 @@ export interface StreamEvent {
   summary?: Summary;
   prompt?: UserPrompt;
   isProcessing?: boolean;
+  queueDepth?: number;
+  id?: number;
+}
+
+export interface ProjectObservationPreview {
+  id: number;
+  type: string;
+  title: string | null;
+  created_at_epoch: number;
+}
+
+export interface ProjectStats {
+  name: string;
+  count: number;
+  lastActivity: number;
+  types: Record<string, number>;
+  recentObservations: ProjectObservationPreview[];
 }
 
 export interface Settings {

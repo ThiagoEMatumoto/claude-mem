@@ -88,6 +88,20 @@ export function useSSE() {
               setQueueDepth(data.queueDepth || 0);
             }
             break;
+
+          case 'observation_deleted':
+            if (data.id) {
+              console.log('[SSE] Observation deleted:', data.id);
+              setObservations(prev => prev.filter(o => o.id !== data.id));
+            }
+            break;
+
+          case 'observation_updated':
+            if (data.observation) {
+              console.log('[SSE] Observation updated:', data.observation.id);
+              setObservations(prev => prev.map(o => o.id === data.observation.id ? data.observation : o));
+            }
+            break;
         }
       };
     };
