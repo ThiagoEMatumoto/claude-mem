@@ -2,8 +2,6 @@
  * Type definitions for observation operations
  * Extracted from SessionStore.ts for modular organization
  */
-import { logger } from '../../../utils/logger.js';
-
 /**
  * Input type for storeObservation function
  */
@@ -69,6 +67,19 @@ export interface RecentObservationRow {
 /**
  * Full recent observation row (for web UI)
  */
+/**
+ * Input type for updateObservation function
+ */
+export interface UpdateObservationInput {
+  title?: string;
+  narrative?: string;
+  facts?: string[];
+  concepts?: string[];
+  type?: string;
+  subtitle?: string;
+  project?: string;
+}
+
 export interface AllRecentObservationRow {
   id: number;
   type: string;
