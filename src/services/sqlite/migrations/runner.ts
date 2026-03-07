@@ -34,6 +34,7 @@ export class MigrationRunner {
     this.addOnUpdateCascadeToForeignKeys();
     this.addObservationContentHashColumn();
     this.addSessionCustomTitleColumn();
+    this.addPendingMessagesProjectOverrideColumn();
   }
 
   /**
@@ -858,5 +859,25 @@ export class MigrationRunner {
     }
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(23, new Date().toISOString());
+  }
+
+  /**
+   * Add project_override column to pending_messages for hub mode (migration 24)
+   * Without this column, project_override resolved by the hook is lost when messages
+   * are persisted to the queue, causing all observations to fall back to the default project.
+   */
+  private addPendingMessagesProjectOverrideColumn(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(24) as SchemaVersion | undefined;
+    if (applied) return;
+
+    const tableInfo = this.db.query('PRAGMA table_info(pending_messages)').all() as TableColumnInfo[];
+    const hasColumn = tableInfo.some(col => col.name === 'project_override');
+
+    if (!hasColumn) {
+      this.db.run('ALTER TABLE pending_messages ADD COLUMN project_override TEXT');
+      logger.debug('DB', 'Added project_override column to pending_messages table');
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(24, new Date().toISOString());
   }
 }

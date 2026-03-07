@@ -435,6 +435,20 @@ export class WorkerService {
       this.resolveInitialization();
       logger.info('SYSTEM', 'Core initialization complete (DB + search ready)');
 
+      // Hub mode: auto-fix observations mis-tagged as default project (fire-and-forget)
+      import('./worker/agents/MistaggedObservationFixer.js').then(({ fixMistaggedObservations }) => {
+        try {
+          const retagged = fixMistaggedObservations(this.dbManager.getSessionStore().db);
+          if (retagged > 0) {
+            logger.info('SYSTEM', `Auto-fixed ${retagged} mis-tagged observations on startup`);
+          }
+        } catch (error) {
+          logger.warn('SYSTEM', 'Mis-tagged observation fix failed (non-blocking)', {}, error as Error);
+        }
+      }).catch(error => {
+        logger.warn('SYSTEM', 'Failed to load MistaggedObservationFixer', {}, error as Error);
+      });
+
       // Auto-backfill Chroma for all projects if out of sync with SQLite (fire-and-forget)
       if (this.chromaMcpManager) {
         ChromaSync.backfillAllProjects().then(() => {

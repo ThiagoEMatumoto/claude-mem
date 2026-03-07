@@ -14,6 +14,8 @@ import {
 } from '../../types/database.js';
 import type { PendingMessageStore } from './PendingMessageStore.js';
 import { computeObservationContentHash, findDuplicateObservation } from './observations/store.js';
+import { deleteObservation as deleteObservationFn, updateObservation as updateObservationFn } from './observations/mutate.js';
+import type { UpdateObservationInput } from './observations/types.js';
 
 /**
  * Session data store for SDK sessions, observations, and summaries
@@ -51,6 +53,7 @@ export class SessionStore {
     this.addOnUpdateCascadeToForeignKeys();
     this.addObservationContentHashColumn();
     this.addSessionCustomTitleColumn();
+    this.addPendingMessagesProjectOverrideColumn();
   }
 
   /**
@@ -874,6 +877,24 @@ export class SessionStore {
   }
 
   /**
+   * Add project_override column to pending_messages for hub mode (migration 24)
+   */
+  private addPendingMessagesProjectOverrideColumn(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(24) as SchemaVersion | undefined;
+    if (applied) return;
+
+    const tableInfo = this.db.query('PRAGMA table_info(pending_messages)').all() as TableColumnInfo[];
+    const hasColumn = tableInfo.some(col => col.name === 'project_override');
+
+    if (!hasColumn) {
+      this.db.run('ALTER TABLE pending_messages ADD COLUMN project_override TEXT');
+      logger.debug('DB', 'Added project_override column to pending_messages table');
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(24, new Date().toISOString());
+  }
+
+  /**
    * Update the memory session ID for a session
    * Called by SDKAgent when it captures the session ID from the first SDK message
    * Also used to RESET to null on stale resume failures (worker-service.ts)
@@ -1179,6 +1200,20 @@ export class SessionStore {
     `);
 
     return stmt.get(id) as ObservationRecord | undefined || null;
+  }
+
+  /**
+   * Delete an observation by ID
+   */
+  deleteObservation(id: number): boolean {
+    return deleteObservationFn(this.db, id);
+  }
+
+  /**
+   * Update an observation by ID with partial fields
+   */
+  updateObservation(id: number, fields: UpdateObservationInput): ObservationRecord | null {
+    return updateObservationFn(this.db, id, fields);
   }
 
   /**

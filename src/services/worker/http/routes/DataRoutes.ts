@@ -44,6 +44,10 @@ export class DataRoutes extends BaseRouteHandler {
     app.post('/api/sdk-sessions/batch', this.handleGetSdkSessionsByIds.bind(this));
     app.get('/api/prompt/:id', this.handleGetPromptById.bind(this));
 
+    // Mutation endpoints
+    app.delete('/api/observation/:id', this.handleDeleteObservation.bind(this));
+    app.put('/api/observation/:id', this.handleUpdateObservation.bind(this));
+
     // Metadata endpoints
     app.get('/api/stats', this.handleGetStats.bind(this));
     app.get('/api/projects', this.handleGetProjects.bind(this));
@@ -106,6 +110,63 @@ export class DataRoutes extends BaseRouteHandler {
     }
 
     res.json(observation);
+  });
+
+  /**
+   * Delete observation by ID
+   * DELETE /api/observation/:id
+   */
+  private handleDeleteObservation = this.wrapHandler((req: Request, res: Response): void => {
+    const id = this.parseIntParam(req, res, 'id');
+    if (id === null) return;
+
+    const store = this.dbManager.getSessionStore();
+    const deleted = store.deleteObservation(id);
+
+    if (!deleted) {
+      this.notFound(res, `Observation #${id} not found`);
+      return;
+    }
+
+    this.sseBroadcaster.broadcast({ type: 'observation_deleted', id });
+    res.json({ success: true, id });
+  });
+
+  /**
+   * Update observation by ID
+   * PUT /api/observation/:id
+   * Body: { title?, narrative?, facts?, concepts?, type?, subtitle?, project? }
+   */
+  private handleUpdateObservation = this.wrapHandler((req: Request, res: Response): void => {
+    const id = this.parseIntParam(req, res, 'id');
+    if (id === null) return;
+
+    const { title, narrative, facts, concepts, type, subtitle, project } = req.body;
+    const fields: Record<string, any> = {};
+
+    if (title !== undefined) fields.title = title;
+    if (narrative !== undefined) fields.narrative = narrative;
+    if (facts !== undefined) fields.facts = facts;
+    if (concepts !== undefined) fields.concepts = concepts;
+    if (type !== undefined) fields.type = type;
+    if (subtitle !== undefined) fields.subtitle = subtitle;
+    if (project !== undefined) fields.project = project;
+
+    if (Object.keys(fields).length === 0) {
+      this.badRequest(res, 'No fields provided to update');
+      return;
+    }
+
+    const store = this.dbManager.getSessionStore();
+    const updated = store.updateObservation(id, fields);
+
+    if (!updated) {
+      this.notFound(res, `Observation #${id} not found`);
+      return;
+    }
+
+    this.sseBroadcaster.broadcast({ type: 'observation_updated', observation: updated });
+    res.json({ success: true, observation: updated });
   });
 
   /**
@@ -254,9 +315,60 @@ export class DataRoutes extends BaseRouteHandler {
   /**
    * Get list of distinct projects from observations
    * GET /api/projects
+   * GET /api/projects?stats=true — returns enriched project data with counts and type breakdown
    */
   private handleGetProjects = this.wrapHandler((req: Request, res: Response): void => {
     const db = this.dbManager.getSessionStore().db;
+    const withStats = req.query.stats === 'true';
+
+    if (withStats) {
+      const rows = db.prepare(`
+        SELECT project, type, COUNT(*) as count, MAX(created_at_epoch) as lastActivity
+        FROM observations
+        WHERE project IS NOT NULL
+        GROUP BY project, type
+        ORDER BY lastActivity DESC
+      `).all() as Array<{ project: string; type: string; count: number; lastActivity: number }>;
+
+      // Aggregate by project
+      const projectMap = new Map<string, { name: string; count: number; lastActivity: number; types: Record<string, number> }>();
+      for (const row of rows) {
+        const existing = projectMap.get(row.project);
+        if (existing) {
+          existing.count += row.count;
+          existing.types[row.type] = row.count;
+          if (row.lastActivity > existing.lastActivity) {
+            existing.lastActivity = row.lastActivity;
+          }
+        } else {
+          projectMap.set(row.project, {
+            name: row.project,
+            count: row.count,
+            lastActivity: row.lastActivity,
+            types: { [row.type]: row.count }
+          });
+        }
+      }
+
+      // Fetch recent observations per project (last 5 each)
+      const recentStmt = db.prepare(`
+        SELECT id, project, type, title, created_at_epoch
+        FROM observations
+        WHERE project = ?
+        ORDER BY created_at_epoch DESC
+        LIMIT 5
+      `);
+
+      const projects = Array.from(projectMap.values())
+        .sort((a, b) => b.lastActivity - a.lastActivity)
+        .map(p => ({
+          ...p,
+          recentObservations: recentStmt.all(p.name) as Array<{ id: number; type: string; title: string | null; created_at_epoch: number }>
+        }));
+
+      res.json({ projects });
+      return;
+    }
 
     const rows = db.prepare(`
       SELECT DISTINCT project
